@@ -1,7 +1,6 @@
 streamlit==1.32.0
-numpy==1.26.0
-tensorflow-cpu==2.15.0  # Use CPU-only version for lighter deployment
+tensorflow-cpu==2.15.0  # Lighter CPU-only version
+numpy==1.23.5  # Known compatible version
 Pillow==10.1.0
-opencv-python-headless==4.8.1  # Headless version for server environments
-python-dotenv==1.0.0
-protobuf==3.20.3  # Specific version to prevent conflicts
+opencv-python-headless==4.8.1  # Server-friendly version
+protobuf==3.20.3  # Prevents version conflicts
