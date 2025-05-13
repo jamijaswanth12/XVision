@@ -1,495 +1,417 @@
 import streamlit as st
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.models import load_model
 from PIL import Image
 import cv2
 import io
-import base64
-import time
-from auth import show_auth_pages, is_logged_in, get_username, logout
+import base64  # Import base64 for image encoding
 
-# --- Page Config ---
-st.set_page_config(
-    page_title="XVision | Advanced Medical Imaging",
-    layout="wide",
-    page_icon="🔬",
-    initial_sidebar_state="expanded"
+# Load full model (Sequential)
+try:
+    full_model = tf.keras.models.load_model("model_xception (2).h5")
+except Exception as e:
+    st.error(f"Failed to load the model: {e}")
+    # Stop execution if the model fails to load
+    st.stop()
+
+# Extract Xception base model (Functional part)
+xception_model = full_model.get_layer("xception")
+xception_model.trainable = False
+
+# Name of the last conv layer in Xception
+last_conv_layer_name = "block14_sepconv2_act"
+
+# Preprocess image
+def preprocess_image(image):
+    try:
+        image = image.convert("RGB")
+        image = image.resize((224, 224))
+        img_array = np.array(image).astype("float32") / 255.0
+        img_array = np.expand_dims(img_array, axis=0)
+        return img_array
+    except Exception as e:
+        st.error(f"Error in preprocess_image: {e}")
+        return None  # Important: Return None on error
+
+# Grad-CAM Function (DO NOT MODIFY)
+def make_gradcam_heatmap(img_array):
+    try:
+        grad_model = tf.keras.models.Model(
+            [xception_model.input],
+            [xception_model.get_layer(last_conv_layer_name).output]
+        )
+
+        with tf.GradientTape() as tape:
+            conv_outputs = grad_model(img_array)
+            tape.watch(conv_outputs)
+            x = conv_outputs
+            x = tf.keras.layers.Dropout(0.5)(x)
+            x = tf.keras.layers.Flatten()(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Dense(32)(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Activation("relu")(x)
+            x = tf.keras.layers.Dropout(0.5)(x)
+            x = tf.keras.layers.Dense(32)(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Activation("relu")(x)
+            x = tf.keras.layers.Dropout(0.5)(x)
+            x = tf.keras.layers.Dense(32)(x)
+            x = tf.keras.layers.BatchNormalization()(x)
+            x = tf.keras.layers.Activation("relu")(x)
+            preds = tf.keras.layers.Dense(1, activation="sigmoid")(x)
+
+        grads = tape.gradient(preds, conv_outputs)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = tf.reduce_sum(conv_outputs * pooled_grads, axis=-1)
+        heatmap = np.maximum(heatmap, 0) / (np.max(heatmap) + 1e-10)
+        return heatmap
+    except Exception as e:
+        st.error(f"Error in make_gradcam_heatmap: {e}")
+        return None  # Important: Return None on error
+
+# Overlay heatmap on image (DO NOT MODIFY)
+def overlay_heatmap(original_img, heatmap, alpha=0.4):
+    try:
+        heatmap = cv2.resize(heatmap, (original_img.width, original_img.height))
+        img_array = np.array(original_img)
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        heatmap_color = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_JET)
+        superimposed_img = cv2.addWeighted(img_array, 1 - alpha, heatmap_color, alpha, 0)
+        superimposed_img = cv2.cvtColor(superimposed_img, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(superimposed_img)
+    except Exception as e:
+        st.error(f"Error in overlay_heatmap: {e}")
+        return None  # Important: Return None on error
+
+# Predict using full model (DO NOT MODIFY)
+def predict_label(img_array):
+    try:
+        return full_model.predict(img_array)
+    except Exception as e:
+        st.error(f"Error in predict_label: {e}")
+        return None  # Important: Return None on error
+
+# Dummy performance metric calculator (DO NOT MODIFY)
+def calculate_metrics(true_labels, predicted_labels):
+    try:
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        accuracy = accuracy_score(true_labels, predicted_labels)
+        precision = precision_score(true_labels, predicted_labels)
+        recall = recall_score(true_labels, predicted_labels)
+        f1 = f1_score(true_labels, predicted_labels)
+        return accuracy, precision, recall, f1
+    except Exception as e:
+        st.error(f"Error in calculate_metrics: {e}")
+        return None  # Important: Return None on error
+
+# --- Streamlit Page Settings ---
+st.set_page_config(page_title="🩺 Lung Cancer Prediction and Classification", layout="wide")
+
+# --- Custom CSS for Improved Styling ---
+st.markdown(
+    """
+    <style>
+    @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+    }
+    @keyframes slideIn {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(0); }
+    }
+    @keyframes pulse {
+        0% { transform: scale(1); }
+        50% { transform: scale(1.1); }
+        100% { transform: scale(1); }
+    }
+    .stApp {
+        background-color: #f0f8ff;
+    }
+    .main {
+        background-color: white;
+        padding: 3rem;
+        border-radius: 15px;
+        box-shadow: 0 0 15px rgba(0, 0, 0, 0.1);
+        margin-top: 2rem;
+        margin-bottom: 2rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        animation: fadeIn 1s ease-in-out;
+    }
+    .left-column {
+        width: 100%;
+        padding-right: 0;
+        margin-bottom: 2rem;
+        animation: slideIn 1s ease-in-out;
+    }
+    .right-column {
+        width: 100%;
+    }
+    h1 {
+        color: #2e8b57;
+        text-align: center;
+        margin-bottom: 2rem;
+        animation: pulse 2s infinite;
+    }
+    h2 {
+        color: #4682b4;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
+    }
+    p {
+        font-size: 1.1rem;
+        color: #555;
+        line-height: 1.7;
+    }
+    .stFileUploader label {
+        background-color: #708090 !important;
+        color: white !important;
+        border-radius: 5px;
+        padding: 0.75rem 1.5rem;
+        font-size: 1.1rem;
+        cursor: pointer;
+        transition: background-color 0.3s ease;
+    }
+    .stFileUploader label:hover {
+        background-color: #556b2f !important;
+    }
+    .stImage > div > img {
+        border-radius: 10px;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        margin-bottom: 1rem;
+        width: 100%;
+        height: auto;
+        animation: fadeIn 1s ease-in-out;
+    }
+    .stDownloadButton button {
+        background-color: #4682b4 !important;
+        color: white !important;
+        border-radius: 5px;
+        padding: 0.75rem 1.5rem;
+        font-size: 1.1rem;
+        transition: background-color 0.3s ease;
+        width: auto;
+    }
+    .stDownloadButton button:hover {
+        background-color: #5f9ea0 !important;
+    }
+    .streamlit-expander header {
+        background-color: #e0f2f7;
+        border-radius: 5px;
+        padding: 0.5rem 1rem;
+        margin-bottom: 1rem;
+    }
+    .streamlit-expander header p {
+        color: #2e8b57;
+        font-size: 1.1rem;
+        font-weight: 500;
+    }
+    .streamlit-expander .streamlit-expander-content {
+        padding: 1rem;
+        font-size: 1rem;
+        color: #555;
+        line-height: 1.7;
+    }
+    .reportview-container .main .st-block-container {
+        max-width: 100%;
+        padding-left: 5rem;
+        padding-right: 5rem;
+        display: block;
+    }
+    @media (max-width: 768px) {
+        .reportview-container .main .st-block-container {
+            padding-left: 1rem;
+            padding-right: 1rem;
+            flex-direction: column;
+        }
+        .left-column, .right-column {
+            width: 100%;
+            padding-right: 0;
+        }
+    }
+    #about-box {
+        background-color: #e0f7fa;
+        border: 1px solid #b0e0e6;
+        border-radius: 5px;
+        padding: 0.75rem;
+        margin-bottom: 1rem;
+        width: 80%;
+        margin-left: auto;
+        margin-right: auto;
+        text-align: center;
+        animation: fadeIn 1s ease-in-out;
+    }
+    #about-box h2 {
+        color: #2e8b57;
+        margin-top: 0;
+        margin-bottom: 0.25rem;
+        font-size: 1.5rem;
+    }
+    #about-box p{
+        font-size: 1rem;
+    }
+    .menu-button {
+        background-color: #4CAF50;
+        color: white;
+        padding: 1rem 2rem;
+        text-align: center;
+        text-decoration: none;
+        display: inline-block;
+        font-size: 1.2rem;
+        margin: 0.5rem 1rem;
+        cursor: pointer;
+        border-radius: 5px;
+        transition: background-color 0.3s ease;
+        width: 200px;
+        animation: fadeIn 1s ease-in-out;
+    }
+    .menu-button:hover {
+        background-color: #367c39;
+    }
+    .hidden {
+        display: none;
+    }
+    #upload-container, #about-container {
+        background-color: #ffffff;
+        padding: 2rem;
+        border-radius: 10px;
+        margin-top: 2rem;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        width: 80%;
+        margin-left: auto;
+        margin-right: auto;
+        animation: fadeIn 1s ease-in-out;
+    }
+    #home-content {
+        text-align: center;
+        padding: 2rem;
+        border-radius: 10px;
+        margin-top: 2rem;
+        background-color: #ffffff;
+        box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        width: 80%;
+        margin-left: auto;
+        margin-right: auto;
+        animation: fadeIn 1s ease-in-out;
+    }
+    #home-content h2{
+        color: #2e8b57;
+        font-size: 2.5rem;
+        margin-bottom: 1rem;
+        animation: pulse 2s infinite;
+    }
+    #home-content p{
+        font-size: 1.2rem;
+        color: #555;
+        line-height: 1.7;
+        margin-bottom: 2rem;
+        animation: slideIn 1s ease-in-out;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
 )
 
-# --- Theme Toggle ---
-def set_theme():
-    st.session_state.theme = not st.session_state.get('theme', False)
-    
-if 'theme' not in st.session_state:
-    st.session_state.theme = False
+# --- Title and Subheader with Emojis ---
+st.title("🩺 Lung Cancer Prediction and Classification")
+st.subheader("Upload a CT image of lung to see the prediction and attention heatmap 🔍")
 
-# --- Animations CSS ---
-st.markdown(f"""
-<style>
-:root {{
-    --primary: {'#4b6cb7' if not st.session_state.theme else '#3da56a'};
-    --secondary: {'#182848' if not st.session_state.theme else '#5a96c9'};
-    --accent: {'#d32f2f' if not st.session_state.theme else '#e53935'};
-    --bg: {'#f8f9fa' if not st.session_state.theme else '#121212'};
-    --card-bg: {'#ffffff' if not st.session_state.theme else '#1e1e1e'};
-    --text: {'#2c3e50' if not st.session_state.theme else '#f0f0f0'};
-    --sidebar-bg: {'linear-gradient(180deg, var(--primary) 0%, #1e6b45 100%)' 
-                  if not st.session_state.theme else 
-                  'linear-gradient(180deg, #121212 0%, #1e1e1e 100%)'};
-}}
+# --- Main App Logic ---
+menu_selection = st.sidebar.selectbox("Menu", ["Home", "Upload Image", "About"])
 
-/* Animations */
-@keyframes float {{
-    0% {{ transform: translateY(0px); }}
-    50% {{ transform: translateY(-8px); }}
-    100% {{ transform: translateY(0px); }}
-}}
 
-@keyframes fadeIn {{
-    from {{ opacity: 0; transform: translateY(20px); }}
-    to {{ opacity: 1; transform: translateY(0); }}
-}}
+# --- Columns for layout ---
+left_column, right_column = st.columns(2)
+# --- Left Column for Image and Information ---
 
-@keyframes pulse {{
-    0% {{ transform: scale(1); }}
-    50% {{ transform: scale(1.03); }}
-    100% {{ transform: scale(1); }}
-}}
-
-.floating {{
-    animation: float 4s ease-in-out infinite;
-}}
-
-.fade-in {{
-    animation: fadeIn 1s ease-out forwards;
-}}
-
-.pulse {{
-    animation: pulse 2s ease-in-out infinite;
-}}
-
-/* Main App Styling */
-.stApp {{
-    background: linear-gradient(135deg, var(--bg) 0%, {'#e4e8eb' if not st.session_state.theme else '#252525'} 100%);
-    font-family: 'Inter', sans-serif;
-    color: var(--text);
-    transition: all 0.5s ease;
-}}
-
-/* Sidebar */
-[data-testid="stSidebar"] {{
-    background: var(--sidebar-bg) !important;
-    color: {'white' if not st.session_state.theme else '#f0f0f0'} !important;
-}}
-
-/* Cards */
-.card {{
-    background: var(--card-bg);
-    border-radius: 16px;
-    padding: 2rem;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-    margin-bottom: 2rem;
-    border: none;
-    transition: all 0.3s ease;
-}}
-
-.card:hover {{
-    transform: translateY(-5px);
-    box-shadow: 0 12px 24px rgba(0,0,0,0.15);
-}}
-
-/* Buttons */
-.stButton>button {{
-    border-radius: 12px !important;
-    padding: 0.75rem 2rem !important;
-    transition: all 0.3s ease !important;
-    font-weight: 600 !important;
-}}
-
-.stButton>button:hover {{
-    transform: translateY(-3px) !important;
-    box-shadow: 0 6px 12px rgba(0,0,0,0.2) !important;
-}}
-
-/* Images */
-.stImage>img {{
-    border-radius: 16px;
-    box-shadow: 0 12px 24px rgba(0,0,0,0.1);
-    transition: transform 0.3s ease;
-}}
-
-.stImage>img:hover {{
-    transform: scale(1.03);
-}}
-
-/* Titles */
-h1, h2, h3 {{
-    color: var(--text) !important;
-    font-weight: 700 !important;
-}}
-
-/* Custom Classes */
-.hero {{
-    background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-    color: white;
-    padding: 4rem;
-    border-radius: 16px;
-    margin-bottom: 2rem;
-    text-align: center;
-}}
-
-.alert {{
-    padding: 1.5rem;
-    border-radius: 12px;
-    font-weight: 500;
-    margin: 1rem 0;
-}}
-
-.alert-warning {{
-    background-color: {'#fff3cd' if not st.session_state.theme else '#5c4b00'};
-    color: {'#856404' if not st.session_state.theme else '#ffd95c'};
-}}
-
-.alert-success {{
-    background-color: {'#d4edda' if not st.session_state.theme else '#1a3a23'};
-    color: {'#155724' if not st.session_state.theme else '#5ae37d'};
-}}
-
-.team-member {{
-    display: flex;
-    justify-content: space-between;
-    padding: 1rem 0;
-    border-bottom: 1px solid {'rgba(0,0,0,0.1)' if not st.session_state.theme else 'rgba(255,255,255,0.1)'};
-    align-items: center;
-}}
-
-.team-member:hover {{
-    transform: translateX(10px);
-}}
-</style>
-""", unsafe_allow_html=True)
-
-# --- Model Loading ---
-@st.cache_resource
-def load_cancer_model():
-    try:
-        model = tf.keras.models.load_model("model_xception (2).h5")
-        return model
-    except Exception as e:
-        st.error(f"Failed to load the model: {e}")
-        st.stop()
-
-# [Keep all your existing image processing functions here]
-
-def show_auth_pages():
-    """Enhanced authentication pages"""
-    query_params = st.query_params
-    
-    if 'token' in query_params and 'purpose' in query_params:
-        token = query_params['token'][0]
-        purpose = query_params['purpose'][0]
-        
-        if purpose == "verify":
-            verify_page(token)
-        elif purpose == "reset":
-            reset_password_page(token)
-        return
-    
-    st.markdown("""
-    <div style="max-width: 500px; margin: 0 auto;">
-        <h1 class="login-title floating" style="text-align: center; margin-bottom: 2rem;">🔬 XVision</h1>
-    """, unsafe_allow_html=True)
-    
-    menu = st.selectbox("Menu", ["Login", "SignUp", "Forgot Password"], label_visibility="collapsed")
-    
-    if menu == "Login":
-        with st.form("login_form"):
-            st.markdown("<h3 style='text-align: center;'>Welcome Back</h3>", unsafe_allow_html=True)
-            username = st.text_input("Username", placeholder="Enter your username")
-            password = st.text_input("Password", type="password", placeholder="Enter your password")
+if menu_selection == "Home":
+    st.markdown(
+        """
+        <div id="home-content">
+            <h2>Welcome</h2>
+            <p>
+                This application is a tool for research and educational purposes, designed to assist in the analysis of lung CT scans.
+                It utilizes a sophisticated deep learning model to predict the likelihood of cancerous indicators and provides visual
+                feedback, highlighting areas of interest in the image.
+            </p>
             
-            if st.form_submit_button("Login", type="primary"):
-                if username and password:
-                    c = conn.cursor()
-                    c.execute("SELECT password, verified FROM users WHERE username = ?", (username,))
-                    result = c.fetchone()
-                    
-                    if result and check_hashes(password, result[0]):
-                        if result[1]:
-                            st.session_state.logged_in = True
-                            st.session_state.username = username
-                            st.success("Logged in successfully!")
-                            st.rerun()
-                        else:
-                            st.error("Account not verified. Check your email.")
-                    else:
-                        st.error("Invalid credentials")
-                else:
-                    st.warning("Please enter both fields")
-    
-    elif menu == "SignUp":
-        with st.form("signup_form"):
-            st.markdown("<h3 style='text-align: center;'>Create Account</h3>", unsafe_allow_html=True)
-            email = st.text_input("Email", placeholder="Your email address")
-            username = st.text_input("Username", placeholder="Choose a username")
-            password = st.text_input("Password", type="password", placeholder="Create a password")
-            confirm_password = st.text_input("Confirm Password", type="password", placeholder="Confirm your password")
-            
-            if st.form_submit_button("Sign Up", type="primary"):
-                if not (email and username and password):
-                    st.warning("Please fill all fields")
-                elif password != confirm_password:
-                    st.error("Passwords don't match")
-                else:
+            Please use the menu on the left to upload a CT scan for analysis or learn more about the application.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+elif menu_selection == "Upload Image":
+    uploaded_file = st.file_uploader("Upload a lung CT image (JPG, PNG)", type=["jpg", "jpeg", "png"])
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+
+        img_array = preprocess_image(image)
+        if img_array is not None:
+            prediction = predict_label(img_array)
+            if prediction is not None:
+                label = "Non-Cancerous" if prediction[0][0] >= 0.5 else "Cancerous"
+                confidence = prediction[0][0] if prediction[0][0] >= 0.5 else 1 - prediction[0][0]
+
+                with left_column:
+                    st.markdown(f"<h2>🔍 Prediction</h2>"
+                                f"<p style='font-size: 1.3rem; font-weight: bold; color: #2e8b57;'>{label}</p>",
+                                unsafe_allow_html=True)
+                    st.progress(int(confidence * 100))
+                    st.markdown(f"<p style='font-size: 1.1rem;'>*Confidence Level:* {confidence:.2%}</p>", unsafe_allow_html=True)
+
+                # --- Right Column for Grad-CAM Heatmap and Instructions ---
+                with right_column:
                     try:
-                        hashed_pwd = make_hashes(password)
-                        conn.cursor().execute("INSERT INTO users (username, email, password) VALUES (?,?,?)",
-                                  (username, email, hashed_pwd))
-                        conn.commit()
-                        
-                        token = generate_token(username, "verify")
-                        verification_link = f"{APP_BASE_URL}/?token={token}&purpose=verify"
-                        email_body = f"""Click this link to verify your account:
-                        {verification_link}
-                        
-                        Link expires in {TOKEN_EXPIRY_HOURS} hours."""
-                        
-                        if send_email(email, "Verify Your Account", email_body):
-                            st.success("Account created! Check your email for verification link.")
+                        heatmap = make_gradcam_heatmap(img_array)
+                        if heatmap is not None:
+                            heatmap_image = overlay_heatmap(image, heatmap, alpha=0.4)
+                            if heatmap_image is not None:
+                                st.markdown("<h2>🔥 Grad-CAM Heatmap (Areas of Interest)</h2>")
+                                st.image(heatmap_image, caption="Grad-CAM Heatmap", use_column_width=True)
+
+                                # Download button
+                                buffered = io.BytesIO()
+                                heatmap_image.save(buffered, format="PNG")
+                                img_str = base64.b64encode(buffered.getvalue()).decode()
+                                href = f'<a href="data:image/png;base64,{img_str}" download="heatmap_result.png" download><button style="background-color:#4682b4;color:white;border-radius:5px;padding:0.75rem 1.5rem;font-size:1.1rem;">📥 Download Heatmap</button></a>'
+                                st.markdown(href, unsafe_allow_html=True)
+                            else:
+                                st.error("Failed to generate overlay heatmap.")
                         else:
-                            st.error("Failed to send verification email")
-                    except sqlite3.IntegrityError as e:
-                        st.error("Username or email already exists")
-    
-    else:  # Forgot Password
-        with st.form("forgot_form"):
-            st.markdown("<h3 style='text-align: center;'>Reset Password</h3>", unsafe_allow_html=True)
-            email = st.text_input("Email", placeholder="Your registered email")
+                            st.error("Failed to generate Grad-CAM heatmap.")
+                    except Exception as e:
+                        st.error(f"Error during Grad-CAM processing: {e}")
+            else:
+                st.error("Failed to get prediction from the model.")
+        else:
+            st.error("Failed to preprocess the image.")
+
+elif menu_selection == "About":
+    st.markdown(
+        """
+        <div id="about-box">
+            <h2>About</h2>
+            <p>Developers: Jami Jaswanth, Palameti Reddy Lakshmi Manoj</p>
+            <p>This application uses a Xception model to classify medical images and highlight areas of interest using Grad-CAM.</p>
             
-            if st.form_submit_button("Send Reset Link", type="primary"):
-                if email:
-                    c = conn.cursor()
-                    c.execute("SELECT username FROM users WHERE email = ?", (email,))
-                    result = c.fetchone()
-                    
-                    if result:
-                        username = result[0]
-                        token = generate_token(username, "reset")
-                        reset_link = f"{APP_BASE_URL}/?token={token}&purpose=reset"
-                        email_body = f"""Click this link to reset your password:
-                        {reset_link}
-                        
-                        Link expires in {TOKEN_EXPIRY_HOURS} hours."""
-                        
-                        if send_email(email, "Password Reset Request", email_body):
-                            st.success("Password reset link sent to your email")
-                        else:
-                            st.error("Failed to send reset email")
-                    else:
-                        st.error("Email not found")
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-
-def main():
-    # --- Theme Toggle Button ---
-    col1, col2 = st.columns([6,1])
-    with col2:
-        st.button("🌓", on_click=set_theme, help="Toggle dark/light mode")
-
-    # --- Authentication Check ---
-    if not is_logged_in():
-        show_auth_pages()
-        return
-
-    # --- Animated Sidebar ---
-    with st.sidebar:
-        st.markdown(f"""
-        <div class="fade-in">
-            <h3 style='color:{"white" if not st.session_state.theme else "#f0f0f0"};'>
-                Welcome back, {get_username()}!
-            </h3>
         </div>
-        """, unsafe_allow_html=True)
-        
-        if st.button("🚪 Logout", type="primary"):
-            logout()
-            st.rerun()
-        
-        st.markdown("---")
-        st.markdown(f"""
-        <div class="fade-in" style="color:{"white" if not st.session_state.theme else "#f0f0f0"}">
-            <h4>Quick Guide</h4>
-            <div>1. Upload a medical scan</div>
-            <div>2. Get AI analysis</div>
-            <div>3. Review results</div>
-        </div>
-        """, unsafe_allow_html=True)
+        """,
+        unsafe_allow_html=True
+    )
 
-    # --- Main Content ---
-    menu_selection = st.sidebar.radio("Navigation", ["Dashboard", "Scan Analysis", "About"])
-
-    if menu_selection == "Dashboard":
-        st.markdown("""
-        <div class="hero floating">
-            <h1>XVision</h1>
-            <h3>Advanced Medical Imaging Platform</h3>
-            <div>Next-generation diagnostic tools powered by AI</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown("""
-            <div class="card fade-in">
-                <h3>🔄 24/7 Analysis</h3>
-                <div>Instant results anytime</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="card fade-in" style="animation-delay: 0.2s">
-                <h3>🎯 High Accuracy</h3>
-                <div>Clinically validated</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown("""
-            <div class="card fade-in" style="animation-delay: 0.4s">
-                <h3>🔍 Detailed Visualization</h3>
-                <div>Precise heatmaps</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    elif menu_selection == "Scan Analysis":
-        st.markdown("""
-        <div class="card pulse">
-            <h2>📤 Upload Medical Scan</h2>
-            <div>CT, MRI, or X-Ray images</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        uploaded_file = st.file_uploader("", type=["jpg", "jpeg", "png", "dcm"], label_visibility="collapsed")
-        
-        if uploaded_file is not None:
-            with st.spinner("🔍 Analyzing scan..."):
-                image = Image.open(uploaded_file)
-                img_array = preprocess_image(image)
-                
-                if img_array is not None:
-                    prediction = predict_label(img_array)
-                    
-                    if prediction is not None:
-                        label = "Normal" if prediction[0][0] >= 0.5 else "Abnormal"
-                        confidence = prediction[0][0] if prediction[0][0] >= 0.5 else 1 - prediction[0][0]
-                        
-                        st.markdown(f"""
-                        <div class="card fade-in">
-                            <h2>📋 Analysis Results</h2>
-                            <div style="display: flex; align-items: center; gap: 1rem; margin: 1.5rem 0;">
-                                <div style="font-size: 2rem; background: {'#d32f2f20' if label == 'Abnormal' else '#2e8b5720'}; 
-                                    color: {'var(--accent)' if label == 'Abnormal' else 'var(--primary)'}; 
-                                    padding: 1rem; border-radius: 50%;">
-                                    {'⚠️' if label == 'Abnormal' else '✅'}
-                                </div>
-                                <div>
-                                    <h3 style="margin: 0; color: {'var(--accent)' if label == 'Abnormal' else 'var(--primary)'};">
-                                        {label} Findings
-                                    </h3>
-                                    <div>Confidence: {confidence:.1%}</div>
-                                </div>
-                            </div>
-                            {"<div class='alert alert-warning'>Recommendation: Consult a specialist</div>" 
-                            if label == "Abnormal" else 
-                            "<div class='alert alert-success'>No concerning patterns detected</div>"}
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown("""
-                            <div class="card fade-in">
-                                <h3>Original Scan</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            st.image(image, use_column_width=True)
-                        
-                        if label == "Abnormal":
-                            with col2:
-                                heatmap = make_gradcam_heatmap(img_array)
-                                if heatmap is not None:
-                                    heatmap_image = overlay_heatmap(image, heatmap)
-                                    if heatmap_image is not None:
-                                        st.markdown("""
-                                        <div class="card fade-in">
-                                            <h3>AI Heatmap</h3>
-                                            <div>Areas of interest highlighted</div>
-                                        </div>
-                                        """, unsafe_allow_html=True)
-                                        st.image(heatmap_image, use_column_width=True)
-                                        
-                                        buffered = io.BytesIO()
-                                        heatmap_image.save(buffered, format="PNG")
-                                        st.download_button(
-                                            label="📥 Download Analysis",
-                                            data=buffered.getvalue(),
-                                            file_name="xvision_analysis.png",
-                                            mime="image/png",
-                                            use_container_width=True
-                                        )
-
-    elif menu_selection == "About":
-        st.markdown("""
-        <div class="card floating">
-            <h1>About XVision</h1>
-            <div>Advanced medical imaging platform</div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            st.markdown("""
-            <div class="fade-in" style="text-align: center;">
-                <div style="font-size: 6rem;">👨‍⚕️</div>
-                <h3>Our Team</h3>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown("""
-            <div class="card fade-in" style="animation-delay: 0.2s">
-                <h3>Core Development</h3>
-                <div class="team-member">
-                    <span>Jami Jaswanth</span>
-                    <span>AI/ML Engineer</span>
-                </div>
-                <div class="team-member">
-                    <span>Palameti Reddy Lakshmi Manoj</span>
-                    <span>Data Scientist</span>
-                </div>
-                <div class="team-member">
-                    <span>Munagala Chandra Vamsi Reddy</span>
-                    <span>Backend Developer</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("""
-        <div class="card fade-in" style="animation-delay: 0.4s">
-            <h3>Our Technology</h3>
-            <div>XVision uses state-of-the-art deep learning models trained on thousands of annotated medical scans to assist healthcare professionals in early detection of abnormalities.</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # --- Footer ---
-    st.markdown("---")
-    st.markdown("""
-    <div style="text-align: center; color: var(--text); padding: 1rem;">
-        <div>XVision Medical Imaging Platform</div>
-        <div><small>For professional use only. Not for diagnostic use.</small></div>
-    </div>
-    """, unsafe_allow_html=True)
-
-if __name__ == "__main__":
-    main()
+# --- Disclaimer and Footer ---
+st.markdown("---")
+st.markdown(
+    """
+    <p style="text-align: center; font-size: 0.9rem; color: #888;">
+    <strong>Disclaimer:</strong> This application is for research and educational purposes only.
+    It is not intended for diagnostic use. Always consult with a qualified medical professional
+    for any health concerns.
+    </p>
+    """,
+    unsafe_allow_html=True
+)
